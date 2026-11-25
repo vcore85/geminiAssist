@@ -68,9 +68,16 @@ import android.widget.Toast;
 import android.webkit.ValueCallback;
 import android.net.Uri;
 
+import androidx.core.graphics.Insets;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowInsetsCompat;
 import androidx.webkit.URLUtilCompat;
 import androidx.webkit.WebViewCompat;
 import androidx.webkit.WebViewFeature;
+
+import io.github.acidefluorhydrique.geminiassist.pcli.PcliRuntime;
+import io.github.acidefluorhydrique.geminiassist.pcli.ProxySettingsActivity;
+import io.github.acidefluorhydrique.geminiassist.pcli.WebViewProxyManager;
 
 import org.json.JSONObject;
 import org.woheller69.freeDroidWarn.FreeDroidWarn;
@@ -90,6 +97,7 @@ public class MainActivity extends Activity {
 
     private WebView chatWebView = null;
     private ImageButton restrictedButton = null;
+    private ImageButton proxyButton = null;
     private WebSettings chatWebSettings = null;
     private CookieManager chatCookieManager = null;
     private final Context context = this;
@@ -104,6 +112,7 @@ public class MainActivity extends Activity {
     private ValueCallback<Uri[]> mUploadMessage;
     private final static int FILE_CHOOSER_REQUEST_CODE = 1;
     private final static int STORAGE_PERMISSION_REQUEST_CODE = 101;
+    private final static int PROXY_SETTINGS_REQUEST_CODE = 102;
 
     private static final String GEMINI_ORIGIN = "https://gemini.google.com";
     private static final String DOWNLOAD_JS_OBJECT = "geminiAssistDownload";
@@ -124,6 +133,7 @@ public class MainActivity extends Activity {
 
         if (restricted) restrictedButton.setImageDrawable(getDrawable(R.drawable.restricted));
         else restrictedButton.setImageDrawable(getDrawable(R.drawable.unrestricted));
+        updateProxyButtonBadge();
 
         restrictedButton.setOnClickListener(v -> {
             restricted = !restricted;
@@ -178,13 +188,31 @@ public class MainActivity extends Activity {
         requestWindowFeature(Window.FEATURE_NO_TITLE);
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
+        View rootView = findViewById(android.R.id.content);
+        ViewCompat.setOnApplyWindowInsetsListener(rootView, (v, insets) -> {
+            Insets bars = insets.getInsets(
+                    WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout());
+            View child = ((android.view.ViewGroup) v).getChildAt(0);
+            if (child != null) {
+                child.setPadding(bars.left, bars.top, bars.right, bars.bottom);
+            }
+            return insets;
+        });
 
         //Create the WebView
         chatWebView = findViewById(R.id.chatWebView);
         registerForContextMenu(chatWebView);
         restrictedButton = findViewById(R.id.restricted);
+        proxyButton = findViewById(R.id.proxyButton);
+        proxyButton.setOnClickListener(v -> {
+            Intent intent = new Intent(context, ProxySettingsActivity.class);
+            startActivityForResult(intent, PROXY_SETTINGS_REQUEST_CODE);
+        });
         makeButtonDraggable();
-        if (prefs.getBoolean("buttonHidden", false)) restrictedButton.setVisibility(View.GONE);
+        if (prefs.getBoolean("buttonHidden", false)) {
+            restrictedButton.setVisibility(View.GONE);
+            proxyButton.setVisibility(View.GONE);
+        }
 
         //Set cookie options
         chatCookieManager = CookieManager.getInstance();
@@ -299,6 +327,12 @@ public class MainActivity extends Activity {
                 downloadBlob(url, URLUtilCompat.getFilenameFromContentDisposition(contentDisposition), mimetype);
                 return;
             }
+            String filename = URLUtilCompat.getFilenameFromContentDisposition(contentDisposition);
+            if (filename == null) filename = URLUtilCompat.guessFileName(url, contentDisposition, mimetype);  // only if getFilenameFromContentDisposition does not work and returns null
+            if (PcliRuntime.isProxyActive()) {
+                WebViewProxyManager.downloadViaProxy(this, url, filename, mimetype, userAgent, PcliRuntime.activeMixedPort());
+                return;
+            }
             Uri source = Uri.parse(url);
             Log.d(TAG,"DownloadManager: " + url);
             DownloadManager.Request request = new DownloadManager.Request(source);
@@ -307,8 +341,6 @@ public class MainActivity extends Activity {
             request.addRequestHeader("Accept-Language", "en-US,en;q=0.7,he;q=0.3");
             request.addRequestHeader("Referer", url);
             request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED); //Notify client once download is completed!
-            String filename = URLUtilCompat.getFilenameFromContentDisposition(contentDisposition);
-            if (filename == null) filename = URLUtilCompat.guessFileName(url, contentDisposition, mimetype);  // only if getFilenameFromContentDisposition does not work and returns null
             request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, filename);
             Toast.makeText(this, getString(R.string.download) + "\n" + filename, Toast.LENGTH_SHORT).show();
             DownloadManager dm = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
@@ -346,9 +378,21 @@ public class MainActivity extends Activity {
         chatWebSettings.setSaveFormData(false);
         chatWebSettings.setGeolocationEnabled(false);
         chatWebSettings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            chatWebSettings.setSafeBrowsingEnabled(false);
+        }
 
-        //Load ChatGPT
-        chatWebView.loadUrl(urlToLoad);
+        //Start built-in pcli proxy (mixed mode, no TUN) if enabled, then load Gemini.
+        //Never silently fall back to direct if proxy is enabled but failed to start.
+        PcliRuntime.startIfEnabled(this, ready -> {
+            updateProxyButtonBadge();
+            if (ready) {
+                chatWebView.loadUrl(urlToLoad);
+            } else {
+                Toast.makeText(context, "pcli 代理未就绪，请先检查节点配置", Toast.LENGTH_LONG).show();
+                startActivityForResult(new Intent(context, ProxySettingsActivity.class), PROXY_SETTINGS_REQUEST_CODE);
+            }
+        });
         FreeDroidWarn.showWarningOnUpgrade(this, BuildConfig.VERSION_CODE);
         if (GithubStar.shouldShowStarDialog(this)) GithubStar.starDialog(this,"https://github.com/acidefluorhydrique/geminiAssist");
     }
@@ -627,6 +671,17 @@ public class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent intent) {
         super.onActivityResult(requestCode, resultCode, intent);
+        if (requestCode == PROXY_SETTINGS_REQUEST_CODE) {
+            updateProxyButtonBadge();
+            if (resultCode == Activity.RESULT_OK) {
+                if (chatWebView.getUrl() == null || chatWebView.getUrl().isEmpty()) {
+                    chatWebView.loadUrl(urlToLoad);
+                } else {
+                    chatWebView.reload();
+                }
+            }
+            return;
+        }
         if (requestCode == FILE_CHOOSER_REQUEST_CODE) {
             if (mUploadMessage == null) return;
             Uri[] result = null;
@@ -655,6 +710,11 @@ public class MainActivity extends Activity {
                     downloadBlob(url, null, null);
                     return;
                 }
+                String filename = URLUtil.guessFileName(url, null, "image/jpeg");
+                if (PcliRuntime.isProxyActive()) {
+                    WebViewProxyManager.downloadViaProxy(this, url, filename, "image/jpeg", chatWebSettings.getUserAgentString(), PcliRuntime.activeMixedPort());
+                    return;
+                }
                 Uri source = Uri.parse(url);
                 DownloadManager.Request request = new DownloadManager.Request(source);
                 request.addRequestHeader("Cookie", CookieManager.getInstance().getCookie(url));
@@ -662,7 +722,6 @@ public class MainActivity extends Activity {
                 request.addRequestHeader("Accept-Language", "en-US,en;q=0.7,he;q=0.3");
                 request.addRequestHeader("Referer", url);
                 request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED); //Notify client once download is completed!
-                String filename = URLUtil.guessFileName(url, null, "image/jpeg");
                 request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, filename);
                 Toast.makeText(this, getString(R.string.download) + "\n" + filename, Toast.LENGTH_SHORT).show();
                 DownloadManager dm = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
@@ -707,8 +766,19 @@ public class MainActivity extends Activity {
         return userAgent.replace("; wv", "").replaceAll("Version/[\\d.]+\\s", "");
     }
 
+    private void updateProxyButtonBadge() {
+        if (proxyButton == null) return;
+        if (PcliRuntime.isProxyActive()) {
+            proxyButton.setColorFilter(0xFF4CAF50);
+        } else {
+            proxyButton.clearColorFilter();
+        }
+    }
+
     private void setButtonHidden(boolean hidden) {
-        restrictedButton.setVisibility(hidden ? View.GONE : View.VISIBLE);
+        int vis = hidden ? View.GONE : View.VISIBLE;
+        restrictedButton.setVisibility(vis);
+        if (proxyButton != null) proxyButton.setVisibility(vis);
         PreferenceManager.getDefaultSharedPreferences(context).edit().putBoolean("buttonHidden", hidden).apply();
     }
 

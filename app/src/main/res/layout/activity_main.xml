@@ -11,6 +11,18 @@
         android:layout_height="match_parent" />
 
     <ImageButton
+        android:id="@+id/proxyButton"
+        android:background="@drawable/button_background"
+        android:layout_width="40dp"
+        android:layout_height="40dp"
+        android:layout_alignParentStart="true"
+        android:layout_margin="6dp"
+        android:padding="8dp"
+        android:scaleType="fitCenter"
+        android:contentDescription="pcli 代理设置"
+        android:src="@drawable/ic_proxy" />
+
+    <ImageButton
         android:id="@+id/restricted"
         android:background="@drawable/button_background"
         android:layout_width="wrap_content"
